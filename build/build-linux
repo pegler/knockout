@@ -21,12 +21,14 @@ echo "(function(window,document,navigator,undefined){" >> $OutDebugFile
 cat $OutDebugFile.temp                                 >> $OutDebugFile
 echo "})(window,document,navigator);"                  >> $OutDebugFile
 rm $OutDebugFile.temp
+echo "A"
 
 cp fragments/version-header.js $OutMinFile
 echo "(function(window,document,navigator,undefined){" >> $OutMinFile
 cat $OutMinFile.temp                                   >> $OutMinFile
 echo "})(window,document,navigator);"                  >> $OutMinFile
 rm $OutMinFile.temp
+echo "A"
 
 # Inject the version number string
 Version=`cat fragments/version.txt`
