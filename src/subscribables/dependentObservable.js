@@ -1,6 +1,7 @@
 ko.dependentObservable = function (evaluatorFunctionOrOptions, evaluatorFunctionTarget, options) {
-    var _latestValue, 
+    var _latestValue,
         _hasBeenEvaluated = false,
+        _isBeingEvaluated = false,
         readFunction = evaluatorFunctionOrOptions;
 
     if (readFunction && typeof readFunction == "object") {
@@ -15,7 +16,7 @@ ko.dependentObservable = function (evaluatorFunctionOrOptions, evaluatorFunction
     }
     // By here, "options" is always non-null
     if (typeof readFunction != "function")
-        throw "Pass a function that returns the value of the ko.computed";
+        throw new Error("Pass a function that returns the value of the ko.computed");
 
     var writeFunction = options["write"];
     if (!evaluatorFunctionTarget)
@@ -29,14 +30,14 @@ ko.dependentObservable = function (evaluatorFunctionOrOptions, evaluatorFunction
         _subscriptionsToDependencies = [];
     }
     var dispose = disposeAllSubscriptionsToDependencies;
-    
+
     // Build "disposeWhenNodeIsRemoved" and "disposeWhenNodeIsRemovedCallback" option values
     // (Note: "disposeWhenNodeIsRemoved" option both proactively disposes as soon as the node is removed using ko.removeNode(),
     // plus adds a "disposeWhen" callback that, on each evaluation, disposes if the node was removed by some other means.)
     var disposeWhenNodeIsRemoved = (typeof options["disposeWhenNodeIsRemoved"] == "object") ? options["disposeWhenNodeIsRemoved"] : null;
     var disposeWhen = options["disposeWhen"] || function() { return false; };
     if (disposeWhenNodeIsRemoved) {
-        dispose = function() { 
+        dispose = function() {
             ko.utils.domNodeDisposal.removeDisposeCallback(disposeWhenNodeIsRemoved, arguments.callee);
             disposeAllSubscriptionsToDependencies();
         };
@@ -44,9 +45,9 @@ ko.dependentObservable = function (evaluatorFunctionOrOptions, evaluatorFunction
         var existingDisposeWhenFunction = disposeWhen;
         disposeWhen = function () {
             return !ko.utils.domNodeIsAttachedToDocument(disposeWhenNodeIsRemoved) || existingDisposeWhenFunction();
-        }    	
+        }
     }
-    
+
     var evaluationTimeoutInstance = null;
     function evaluatePossiblyAsync() {
         var throttleEvaluationTimeout = dependentObservable['throttleEvaluation'];
@@ -58,6 +59,14 @@ ko.dependentObservable = function (evaluatorFunctionOrOptions, evaluatorFunction
     }
 
     function evaluateImmediate() {
+        if (_isBeingEvaluated) {
+            // If the evaluation of a ko.computed causes side effects, it's possible that it will trigger its own re-evaluation.
+            // This is not desirable (it's hard for a developer to realise a chain of dependencies might cause this, and they almost
+            // certainly didn't intend infinite re-evaluations). So, for predictability, we simply prevent ko.computeds from causing
+            // their own re-evaluation. Further discussion at https://github.com/SteveSanderson/knockout/pull/387
+            return;
+        }
+
         // Don't dispose on first evaluation, because the "disposeWhen" callback might
         // e.g., dispose when the associated DOM element isn't in the doc, and it's not
         // going to be in the doc until *after* the first evaluation
@@ -66,8 +75,9 @@ ko.dependentObservable = function (evaluatorFunctionOrOptions, evaluatorFunction
             return;
         }
 
+        _isBeingEvaluated = true;
         try {
-            // Initially, we assume that none of the subscriptions are still being used (i.e., all are candidates for disposal). 
+            // Initially, we assume that none of the subscriptions are still being used (i.e., all are candidates for disposal).
             // Then, during evaluation, we cross off any that are in fact still being used.
             var disposalCandidates = ko.utils.arrayMap(_subscriptionsToDependencies, function(item) {return item.target;});
 
@@ -86,31 +96,34 @@ ko.dependentObservable = function (evaluatorFunctionOrOptions, evaluatorFunction
                 if (disposalCandidates[i])
                     _subscriptionsToDependencies.splice(i, 1)[0].dispose();
             }
+            _hasBeenEvaluated = true;
 
             dependentObservable["notifySubscribers"](_latestValue, "beforeChange");
             _latestValue = newValue;
+            if (DEBUG) dependentObservable._latestValue = _latestValue;
         } finally {
             ko.dependencyDetection.end();
         }
 
         dependentObservable["notifySubscribers"](_latestValue);
-        _hasBeenEvaluated = true;
+        _isBeingEvaluated = false;
+
     }
 
     function dependentObservable() {
         if (arguments.length > 0) {
             set.apply(dependentObservable, arguments);
         } else {
-            return get();             
+            return get();
         }
     }
-    
+
     function set() {
         if (typeof writeFunction === "function") {
             // Writing a value
             writeFunction.apply(evaluatorFunctionTarget, arguments);
         } else {
-            throw "Cannot write a value to a ko.computed unless you specify a 'write' option. If you wish to read the current value, don't pass any parameters.";
+            throw new Error("Cannot write a value to a ko.computed unless you specify a 'write' option. If you wish to read the current value, don't pass any parameters.");
         }
     }
 
@@ -125,24 +138,29 @@ ko.dependentObservable = function (evaluatorFunctionOrOptions, evaluatorFunction
     dependentObservable.getDependenciesCount = function () { return _subscriptionsToDependencies.length; };
     dependentObservable.hasWriteFunction = typeof options["write"] === "function";
     dependentObservable.dispose = function () { dispose(); };
-    
+
     ko.subscribable.call(dependentObservable);
     ko.utils.extend(dependentObservable, ko.dependentObservable['fn']);
 
     if (options['deferEvaluation'] !== true)
         evaluateImmediate();
-    
+
     ko.exportProperty(dependentObservable, 'dispose', dependentObservable.dispose);
     ko.exportProperty(dependentObservable, 'getDependenciesCount', dependentObservable.getDependenciesCount);
-    
+
     return dependentObservable;
 };
 
-ko.dependentObservable['fn'] = {
-    __ko_proto__: ko.dependentObservable
+ko.isComputed = function(instance) {
+    return ko.hasPrototype(instance, ko.dependentObservable);
 };
 
-ko.dependentObservable.__ko_proto__ = ko.observable;
+var protoProp = ko.observable.protoProperty; // == "__ko_proto__"
+ko.dependentObservable[protoProp] = ko.observable;
+
+ko.dependentObservable['fn'] = {};
+ko.dependentObservable['fn'][protoProp] = ko.dependentObservable;
 
 ko.exportSymbol('dependentObservable', ko.dependentObservable);
 ko.exportSymbol('computed', ko.dependentObservable); // Make "ko.computed" an alias for "ko.dependentObservable"
+ko.exportSymbol('isComputed', ko.isComputed);
